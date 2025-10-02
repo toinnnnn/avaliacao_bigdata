@@ -1,0 +1,16 @@
+# APIs
+spotipy
+google-api-python-client
+requests
+rapidfuzz
+
+# Data
+pandas
+sqlalchemy
+psycopg2-binary
+python-dotenv
+
+# Dashboard
+streamlit
+streamlit-option-menu
+plotly
