@@ -1,16 +1,15 @@
-# src/dashboard/app_streamlit.py
-
+# src/app_streamlit.py
 import os
-import urllib.parse
-import streamlit as st
 import pandas as pd
 import plotly.express as px
-from sqlalchemy import create_engine, text
+import streamlit as st
+from sqlalchemy import create_engine
 from dotenv import load_dotenv
+from rapidfuzz import process
 
-# -----------------------------
-# Config / .env
-# -----------------------------
+# ================================
+# Configuração
+# ================================
 load_dotenv()
 
 DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -19,199 +18,193 @@ DB_NAME = os.getenv("DB_NAME", "spotify_youtube")
 DB_USER = os.getenv("DB_USER", "postgres")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
 
-DB_PASSWORD_SAFE = urllib.parse.quote_plus(DB_PASSWORD)
+engine = create_engine(f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
 
-# Force client encoding option (we also execute SET client_encoding at runtime)
-engine = create_engine(
-    f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD_SAFE}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
-    connect_args={"options": "-c client_encoding=UTF8"}
-)
+# ================================
+# Funções auxiliares
+# ================================
+@st.cache_data
+def load_spotify():
+    return pd.read_sql("SELECT * FROM spotify_tracks", engine)
 
-# -----------------------------
-# Helper: carregar tabela
-# -----------------------------
-@st.cache_data(show_spinner=False)
-def load_data(table_name: str) -> pd.DataFrame:
-    """
-    Tenta carregar a tabela. Faz SET client_encoding TO 'UTF8' antes do SELECT.
-    Em caso de erro, captura e retorna DataFrame vazio (e a UI exibirá mensagem).
-    """
-    try:
-        with engine.connect() as conn:
-            # usar sqlalchemy.text para evitar "Not an executable object"
-            conn.execute(text("SET client_encoding TO 'UTF8'"))
-            df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
-        return df
-    except Exception as e:
-        # devolve DataFrame vazio e propaga mensagem via retorno conveniente
-        raise RuntimeError(f"Erro ao ler tabela {table_name}: {e}") from e
+@st.cache_data
+def load_youtube():
+    return pd.read_sql("SELECT * FROM youtube_videos", engine)
 
-# -----------------------------
-# Streamlit layout
-# -----------------------------
-st.set_page_config(page_title="🎶 Spotify & YouTube Dashboard", layout="wide")
+# ================================
+# Carregar dados
+# ================================
+spotify_df = load_spotify()
+youtube_df = load_youtube()
 
-# Sidebar / Navegação
-st.sidebar.image("https://cdn-icons-png.flaticon.com/512/1384/1384060.png", width=96)
-st.sidebar.title("Navegação")
-page = st.sidebar.radio("Ir para", ["Dashboard", "Spotify", "YouTube", "Correlação", "Regiões"])
+# ================================
+# Layout inicial
+# ================================
+st.set_page_config(page_title="Dashboard Spotify & YouTube", layout="wide", initial_sidebar_state="expanded")
+st.sidebar.header("🎚️ Filtros")
 
-# Header
-st.markdown(
-    "<h1 style='text-align: center; color: #1DB954; margin-bottom: 0.1rem;'>🎶 Spotify & YouTube Analytics</h1>",
-    unsafe_allow_html=True,
-)
-st.markdown("<div style='text-align:center; color: #666;'>Análise e correlação entre dados do Spotify e do YouTube</div>", unsafe_allow_html=True)
-st.markdown("---")
+# ================================
+# Filtros globais
+# ================================
+# Região
+regions = sorted(list(set(spotify_df['region'].unique()) | set(youtube_df['region'].unique())))
+region_sel = st.sidebar.multiselect("🌍 Regiões", regions, default=regions)
 
-# Carregar dados (com mensagens de erro amigáveis)
-spotify_df = pd.DataFrame()
-youtube_df = pd.DataFrame()
-correlations_df = pd.DataFrame()
+# Ano (Spotify)
+years = sorted(spotify_df['release_year'].dropna().unique())
+if years:
+    year_sel = st.sidebar.slider("📅 Intervalo de Anos", int(min(years)), int(max(years)),
+                                 (int(min(years)), int(max(years))))
+else:
+    year_sel = (2000, 2025)
 
-try:
-    spotify_df = load_data("spotify_tracks")
-except Exception as e:
-    st.sidebar.error(str(e))
+# Spotify - artistas
+artists = sorted(spotify_df['artist_name'].dropna().unique())
+artist_sel = st.sidebar.multiselect("👤 Artistas (Spotify)", artists, default=artists)
 
-try:
-    youtube_df = load_data("youtube_videos")
-except Exception as e:
-    st.sidebar.error(str(e))
+# Spotify - popularidade
+pop_min, pop_max = int(spotify_df['popularity'].min()), int(spotify_df['popularity'].max())
+popularity_sel = st.sidebar.slider("🔥 Popularidade (Spotify)", pop_min, pop_max, (pop_min, pop_max))
 
-try:
-    correlations_df = load_data("correlations")
-except Exception as e:
-    st.sidebar.error(str(e))
+# YouTube - categorias
+categories = sorted(youtube_df['category'].dropna().unique())
+category_sel = st.sidebar.multiselect("🎬 Categorias (YouTube)", categories, default=categories)
 
-# -----------------------------
-# Função utilitária: cards de métricas
-# -----------------------------
-def show_summary_cards_for_spotify(df: pd.DataFrame):
-    c1, c2, c3, c4 = st.columns(4)
-    if not df.empty:
-        c1.metric("Músicas (linhas)", f"{len(df):,}")
-        c2.metric("Artistas únicos", f"{df['artist'].nunique():,}" if "artist" in df.columns else "—")
-        if "popularity" in df.columns:
-            c3.metric("Popularidade média", f"{df['popularity'].mean():.1f}")
-        else:
-            c3.metric("Popularidade média", "—")
-        if "duration_ms" in df.columns:
-            c4.metric("Duração média (s)", f"{(df['duration_ms'].mean() / 1000):.0f}")
-        else:
-            c4.metric("Duração média (s)", "—")
-    else:
-        c1.info("Sem dados")
-        c2.info("")
-        c3.info("")
-        c4.info("")
+# YouTube - canais
+channels = sorted(youtube_df['channel_title'].dropna().unique())
+channel_sel = st.sidebar.multiselect("📺 Canais (YouTube)", channels, default=channels)
 
-def show_summary_cards_for_youtube(df: pd.DataFrame):
-    c1, c2, c3, c4 = st.columns(4)
-    if not df.empty:
-        c1.metric("Vídeos (linhas)", f"{len(df):,}")
-        c2.metric("Canais únicos", f"{df['channel_title'].nunique():,}" if "channel_title" in df.columns else "—")
-        c3.metric("Views total", f"{df['view_count'].sum():,}" if "view_count" in df.columns else "—")
-        c4.metric("Comentários total", f"{df['comment_count'].sum():,}" if "comment_count" in df.columns else "—")
-    else:
-        c1.info("Sem dados")
-        c2.info("")
-        c3.info("")
-        c4.info("")
+# YouTube - engajamento
+views_min, views_max = int(youtube_df['view_count'].min()), int(youtube_df['view_count'].max())
+views_sel = st.sidebar.slider("👀 Views (YouTube)", views_min, views_max, (views_min, views_max))
 
-# -----------------------------
-# Pages
-# -----------------------------
-if page == "Dashboard":
-    st.subheader("Visão geral")
-    st.markdown("Resumo rápido das três fontes de dados.")
-    st.markdown("**Spotify**")
-    show_summary_cards_for_spotify(spotify_df)
-    st.markdown("**YouTube**")
-    show_summary_cards_for_youtube(youtube_df)
-    st.markdown("**Correlações**")
-    if not correlations_df.empty:
-        st.write(f"Total de correlações: **{len(correlations_df):,}**")
-    else:
-        st.info("Nenhuma correlação carregada.")
+# ================================
+# Aplicar filtros
+# ================================
+spotify_df = spotify_df[
+    (spotify_df['region'].isin(region_sel)) &
+    (spotify_df['release_year'].between(year_sel[0], year_sel[1])) &
+    (spotify_df['artist_name'].isin(artist_sel)) &
+    (spotify_df['popularity'].between(popularity_sel[0], popularity_sel[1]))
+]
 
-elif page == "Spotify":
-    st.subheader("📈 Spotify - dados e gráficos")
-    if spotify_df.empty:
-        st.warning("Nenhum dado do Spotify disponível.")
-    else:
-        show_summary_cards_for_spotify(spotify_df)
-        st.markdown("**Top 20 artistas por popularidade média**")
-        top_artists = (
-            spotify_df.groupby("artist")["popularity"].mean().reset_index().sort_values("popularity", ascending=False).head(20)
-        )
-        fig = px.bar(top_artists, x="artist", y="popularity", text="popularity",
-                     title="Top 20 Artistas (Popularidade média)",
-                     color="popularity", color_continuous_scale="Blues")
+youtube_df = youtube_df[
+    (youtube_df['region'].isin(region_sel)) &
+    (youtube_df['category'].isin(category_sel)) &
+    (youtube_df['channel_title'].isin(channel_sel)) &
+    (youtube_df['view_count'].between(views_sel[0], views_sel[1]))
+]
+
+# ================================
+# Layout principal
+# ================================
+st.title("📊 Dashboard Spotify & YouTube")
+st.markdown("Exploração interativa dos dados de músicas e vídeos com base nos ETLs desenvolvidos.")
+
+# ================================
+# 1. Análise Spotify
+# ================================
+st.header("🎵 Spotify - Faixas e Popularidade")
+
+col1, col2 = st.columns(2)
+with col1:
+    if not spotify_df.empty:
+        fig = px.histogram(spotify_df, x="popularity", nbins=20, title="Distribuição da Popularidade")
         st.plotly_chart(fig, use_container_width=True)
-
-        st.markdown("**Tabela (amostra)**")
-        st.dataframe(spotify_df.head(200))
-
-elif page == "YouTube":
-    st.subheader("📺 YouTube - dados e gráficos")
-    if youtube_df.empty:
-        st.warning("Nenhum dado do YouTube disponível.")
     else:
-        show_summary_cards_for_youtube(youtube_df)
+        st.info("⚠️ Nenhum dado após aplicar os filtros.")
 
-        st.markdown("**Top categorias (por views)**")
-        if "category_id" in youtube_df.columns and "view_count" in youtube_df.columns:
-            top_cats = youtube_df.groupby("category_id")["view_count"].sum().reset_index().sort_values("view_count", ascending=False).head(10)
-            fig = px.pie(top_cats, names="category_id", values="view_count", title="Distribuição de Views por Categoria (Top 10)")
-            st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(top_cats)
-        else:
-            st.info("category_id ou view_count não disponível.")
-
-        st.markdown("**Views vs Likes (tamanho = comentários)**")
-        if {"view_count", "like_count", "comment_count"}.issubset(youtube_df.columns):
-            fig2 = px.scatter(youtube_df, x="view_count", y="like_count", size="comment_count", hover_name="title",
-                              title="Views vs Likes (tamanho = comentários)")
-            st.plotly_chart(fig2, use_container_width=True)
-        st.markdown("**Tabela (amostra)**")
-        st.dataframe(youtube_df.head(200))
-
-elif page == "Correlação":
-    st.subheader("🔗 Correlações encontradas")
-    if correlations_df.empty:
-        st.warning("Nenhuma correlação carregada.")
+with col2:
+    if not spotify_df.empty:
+        fig = px.histogram(spotify_df, x="duration_s", nbins=20, title="Distribuição da Duração (s)")
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.markdown("**Resumo e tabela**")
-        st.dataframe(correlations_df.sort_values("similarity_score", ascending=False).head(200))
-        st.markdown("**Distribuição de scores de similaridade**")
-        if "similarity_score" in correlations_df.columns:
-            fig = px.histogram(correlations_df, x="similarity_score", nbins=20, title="Distribuição de similarity_score")
-            st.plotly_chart(fig, use_container_width=True)
-        # gráfico comparativo: popularidade da música vs views do vídeo (se possível)
-        if {"track_id", "video_id"}.issubset(correlations_df.columns) and not spotify_df.empty and not youtube_df.empty:
-            # juntar dados (inner join simples)
-            join_df = correlations_df.merge(spotify_df[["track_id", "popularity"]], on="track_id", how="left") \
-                                     .merge(youtube_df[["video_id", "view_count"]], on="video_id", how="left")
-            if {"popularity", "view_count"}.issubset(join_df.columns):
-                st.markdown("**Popularidade (Spotify) vs Views (YouTube) — correlações encontradas**")
-                fig2 = px.scatter(join_df, x="popularity", y="view_count", hover_data=["track_id", "video_id"],
-                                  title="Popularidade (Spotify) vs Views (YouTube)")
-                st.plotly_chart(fig2, use_container_width=True)
+        st.info("⚠️ Nenhum dado após aplicar os filtros.")
 
-elif page == "Regiões":
-    st.subheader("🌍 Análise por Região (YouTube)")
-    if youtube_df.empty:
-        st.warning("Nenhum dado do YouTube disponível.")
+# ================================
+# 2. YouTube - Visão geral
+# ================================
+st.header("📺 YouTube - Visão Geral")
+
+if not youtube_df.empty:
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Vídeos", youtube_df['video_id'].nunique())
+    col2.metric("Canais únicos", youtube_df['channel_id'].nunique())
+    col3.metric("Views total", f"{youtube_df['view_count'].sum():,}")
+    col4.metric("Comentários total", f"{youtube_df['comment_count'].sum():,}")
+else:
+    st.info("⚠️ Nenhum dado de YouTube após aplicar os filtros.")
+
+# ================================
+# 3. Categorias YouTube
+# ================================
+st.subheader("🎬 Top Categorias por Views")
+
+if not youtube_df.empty:
+    cat_df = youtube_df.groupby("category", as_index=False)['view_count'].sum()
+    cat_df = cat_df.sort_values(by="view_count", ascending=False).head(10)
+
+    fig = px.bar(cat_df, x="category", y="view_count", title="Top Categorias (Views)", text_auto=True)
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("⚠️ Nenhum dado de categoria após aplicar os filtros.")
+
+# ================================
+# 4. Engajamento por Região
+# ================================
+st.header("🌍 Análise por Região")
+
+col1, col2 = st.columns(2)
+with col1:
+    region_sp = spotify_df.groupby("region", as_index=False)['popularity'].mean()
+    if not region_sp.empty:
+        fig = px.bar(region_sp, x="region", y="popularity", title="Popularidade Média no Spotify", text_auto=True)
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        if "region" in youtube_df.columns and "view_count" in youtube_df.columns:
-            region_views = youtube_df.groupby("region")["view_count"].sum().reset_index().sort_values("view_count", ascending=False)
-            fig = px.bar(region_views, x="region", y="view_count", text="view_count", title="Views por Região")
-            st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(region_views)
-        else:
-            st.info("As colunas 'region' e 'view_count' são necessárias para esta aba.")
+        st.info("⚠️ Nenhum dado Spotify após aplicar os filtros.")
 
-# Footer / nota
+with col2:
+    region_yt = youtube_df.groupby("region", as_index=False)['view_count'].sum()
+    if not region_yt.empty:
+        fig = px.bar(region_yt, x="region", y="view_count", title="Views Totais no YouTube", text_auto=True)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("⚠️ Nenhum dado YouTube após aplicar os filtros.")
+
+# ================================
+# 5. Correlação Spotify x YouTube
+# ================================
+st.header("🔗 Correlação Spotify x YouTube")
+
+corr_data = []
+yt_titles = youtube_df['title'].dropna().unique().tolist()
+
+for _, row in spotify_df.iterrows():
+    match = process.extractOne(row['track_name'], yt_titles, score_cutoff=80)
+    if match:
+        yt_row = youtube_df[youtube_df['title'] == match[0]].iloc[0]
+        corr_data.append({
+            "track_name": row['track_name'],
+            "artist_name": row['artist_name'],
+            "popularity": row['popularity'],
+            "video_title": yt_row['title'],
+            "view_count": yt_row['view_count'],
+            "score": match[1]
+        })
+
+corr_df = pd.DataFrame(corr_data)
+if not corr_df.empty:
+    fig = px.scatter(
+        corr_df, x="popularity", y="view_count",
+        hover_data=["track_name", "artist_name", "video_title", "score"],
+        title="Popularidade (Spotify) vs Views (YouTube)"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("⚠️ Nenhuma correspondência encontrada após aplicar os filtros.")
+
+# ================================
+# Rodapé
+# ================================
 st.markdown("---")
-st.caption("Dashboard criado para a atividade. (Use Ctrl+C no terminal para parar o Streamlit)")
+st.caption("Dashboard criado para a atividade. Use Ctrl+C no terminal para parar o Streamlit.")

@@ -1,46 +1,49 @@
+# src/extract_spotify.py
 import os
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
 import pandas as pd
-from spotipy import Spotify
-from spotipy.oauth2 import SpotifyOAuth
 from dotenv import load_dotenv
 
 load_dotenv()
 
-def get_spotify_client():
-    client_id = os.getenv("SPOTIPY_CLIENT_ID")
-    client_secret = os.getenv("SPOTIPY_CLIENT_SECRET")
-    redirect_uri = os.getenv("SPOTIPY_REDIRECT_URI")
+# Autenticação
+sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
+    client_id=os.getenv("SPOTIFY_CLIENT_ID"),
+    client_secret=os.getenv("SPOTIFY_CLIENT_SECRET")
+))
 
-    return Spotify(auth_manager=SpotifyOAuth(
-        client_id=client_id,
-        client_secret=client_secret,
-        redirect_uri=redirect_uri,
-        scope="playlist-read-private playlist-read-collaborative"
-    ))
+# 🔥 Playlists oficiais do Spotify (Top 50 Global + regionais)
+REGIONS = {
+    "GLOBAL": "3MtqrQpHawSInQYTitTveL",  # Top 50 Global (novo ID)
+    "BR": "0oU481CO1t5yFqDcxfoLkF",      # Top 50 Brasil
+    "US": "4NYOtcP8uR78vxFscJtOhU",      # Top 50 USA
+    "MX": "1QGHb6CaUuA6pf6Z5DYDUM",      # Top 50 México
+    "PT": "0iXCcDOlT2OeRzbOujXdGH"       # Top 50 Portugal
+}
 
-def fetch_playlist_tracks(sp, playlist_id, limit=100):
-    results = sp.playlist_items(playlist_id, limit=limit)
-    items = results.get("items", [])
-    rows = []
-    for it in items:
-        t = it["track"]
-        if not t:
-            continue
-        artists = [a["name"] for a in t["artists"]]
-        rows.append({
-            "track_id": t["id"],
-            "name": t["name"],
-            "artists": artists,
-            "artist": artists[0] if artists else None,
-            "album": t["album"]["name"],
-            "popularity": t["popularity"],
-            "duration_ms": t["duration_ms"],
-            "release_date": t["album"].get("release_date")
-        })
-    return pd.DataFrame(rows)
+def extract_spotify_tracks():
+    all_data = []
+    for region, playlist_id in REGIONS.items():
+        print(f"🎶 Extraindo playlist {region}...")
+        results = sp.playlist_tracks(playlist_id, additional_types=["track"])
+        for item in results["items"]:
+            track = item["track"]
+            if not track:
+                continue
+            all_data.append({
+                "track_id": track["id"],
+                "track_name": track["name"],
+                "artist_name": ", ".join([a["name"] for a in track["artists"]]),
+                "album_name": track["album"]["name"],
+                "release_year": int(track["album"]["release_date"][:4]),
+                "duration_s": track["duration_ms"] // 1000,
+                "popularity": track["popularity"],
+                "region": region
+            })
+    return pd.DataFrame(all_data)
 
 if __name__ == "__main__":
-    sp = get_spotify_client()
-    playlist_id = "2Y1AD7uedwsVvCrLYQmqTI"  # exemplo: sua playlist pessoal
-    df = fetch_playlist_tracks(sp, playlist_id, limit=20)
-    print(df.head())
+    df = extract_spotify_tracks()
+    print(df.groupby("region")["track_id"].count())
+    df.to_csv("spotify_tracks.csv", index=False, encoding="utf-8")
