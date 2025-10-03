@@ -197,5 +197,8 @@ Com o ETL desenvolvido e o dashboard interativo, é possível identificar padrõ
 * **Antônio Vinícius**
 * **Douglas Lucas**
 * **Matheus Ramos**
+* **Irene Eloyse**
+* **Maria Luiza**
+* **Jordy Arlego**
 * – Desenvolvimento do ETL e Dashboard
 * Atividade acadêmica de Big Data — 2025
